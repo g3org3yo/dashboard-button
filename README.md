@@ -32,6 +32,56 @@ Pure front-end: **no agent involved, no tokens spent.** The plugin only
   - run `hermes dashboard` when you want it, or
   - pair the plugin with an auto-start watchdog so it is always available.
 
+## ⚠️ If the plugin shows `failed` instead of loading (Hermes desktop 0.20.x)
+
+Some **Hermes desktop 0.20.x builds** ship a broken plugin-SDK bundle: the app
+captures the plugin-SDK namespaces at module scope, *before* the module that
+defines them has run, so `Object.keys(undefined)` throws **inside the app's own
+plugin loader** — before any plugin code runs. The symptom is therefore
+universal (it hits every plugin loaded from disk, not just this one) and looks
+like this — Capabilities → Plugins → *Desktop plugins*:
+
+```
+dashboard-button    on disk    failed
+Cannot convert undefined or null to object
+```
+
+…and in `%LOCALAPPDATA%\hermes\logs\desktop.log`:
+
+```
+[renderer console:main] [plugins] runtime load failed (<id>) TypeError: Cannot convert
+undefined or null to object (.../dist/assets/sdk-<hash>.js:5)
+```
+
+**No plugin can work around it** — the throw happens before the plugin is
+evaluated. Two ways out:
+
+1. **Update Hermes** once the upstream fix lands: reported in
+   [issue #107304](https://github.com/NousResearch/hermes-agent/issues/107304),
+   fix proposed in
+   [PR #107303](https://github.com/NousResearch/hermes-agent/pull/107303).
+2. **Fix the build you already have**, with
+   [`tools/hermes-plugin-sdk-hotfix.py`](tools/hermes-plugin-sdk-hotfix.py): it
+   finds the app's renderer bundle, rewrites those four SDK globals as lazy
+   getters (so they are read when the app is up), syntax-checks the result and
+   keeps a backup next to the original file.
+
+```bash
+python tools/hermes-plugin-sdk-hotfix.py           # dry run — what would change
+python tools/hermes-plugin-sdk-hotfix.py --apply   # patch + verify
+# then FULLY restart the Hermes desktop app (close it and reopen it)
+```
+
+It is safe to run more than once (an already-fixed bundle is detected and left
+alone), it prints every path it touched, and it says which roots it searched —
+if your install lives elsewhere, point at it with `--root <dir>`. Afterwards
+the *Desktop plugins* row must no longer say `failed`.
+
+`plugin.js` itself needed **no** change for this: the plugin is verified working
+on desktop **0.20.4** with the SDK fix applied (sidebar row, in-app page and
+statusbar chip all load). The full diagnosis we filed lives in
+[`upstream/`](upstream/).
+
 ## Auto-start watchdog (optional, Windows)
 
 The repo ships a hardened watchdog script —
@@ -62,6 +112,10 @@ To replace an existing install: `hermes://plugin/install?repo=g3org3yo/dashboard
 The plugin is a single plain-ESM file ([`plugin.js`](plugin.js)) using the
 `@hermes/plugin-sdk`. Drop the folder into your local
 `<hermes-home>/desktop-plugins/` and it hot-reloads on save — no build step.
+
+`tools/hermes-plugin-sdk-hotfix.py` is a standalone, stdlib-only rescue tool
+for the app-side 0.20.x bug described above. `upstream/` holds the diagnosis
+and patch as filed upstream (issue #107304 / PR #107303).
 
 ## License
 
