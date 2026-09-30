@@ -1,0 +1,15 @@
+manifest_version: 1
+name: dashboard-button
+version: "1.0.0"
+description: >
+  One-click access to the Hermes Web Dashboard (http://127.0.0.1:9119) from the
+  Hermes Desktop app: a sidebar row and an in-app page that load by themselves
+  once the dashboard server is up, plus a status-bar chip with a live status dot
+  that opens the dashboard in your default browser. Pure front-end — no agent
+  calls, no tokens, no API keys; the only network traffic is a liveness probe
+  against the local dashboard port.
+author: g3org3yo
+license: MIT
+homepage: https://github.com/g3org3yo/dashboard-button
+requires_hermes: ">=0.20"
+tags: [desktop, dashboard, ui]

@@ -101,16 +101,39 @@ cron job** that runs every minute:
 
 1. Click the badge/link above (opens Hermes Desktop with a confirmation
    dialog), or in the app: **Settings → Plugins → Install from Git** and paste
-   `g3org3yo/dashboard-button`.
-2. Pick **Desktop UI** in the dialog and confirm.
-3. The plugin appears in the sidebar and statusbar immediately.
+   `g3org3yo/dashboard-button` — or from a terminal:
+
+   ```bash
+   hermes plugins install g3org3yo/dashboard-button --enable
+   ```
+2. **Turn the desktop half on**: **Settings → Plugins → Desktop plugins** → enable
+   *dashboard-button*. Desktop parts are opt-in by design, so the plugin stays
+   inert until you flip it on.
+3. The sidebar row and the statusbar chip appear immediately.
 
 To replace an existing install: `hermes://plugin/install?repo=g3org3yo/dashboard-button&force=1`.
 
+## Layout
+
+```
+plugin.yaml          manifest (name, version, requires_hermes, tags)
+__init__.py          agent half — intentionally empty, registers nothing
+desktop/plugin.js    the actual plugin: sidebar row + in-app page + statusbar chip
+companion/           optional Windows auto-start watchdog for `hermes dashboard`
+tools/               SDK hotfix for the Hermes desktop 0.20.x loader bug
+upstream/            diagnosis + patch filed upstream (issue #107304 / PR #107303)
+```
+
+The repo is a **single package for both SDKs**: `plugin.yaml` + `__init__.py`
+make it a valid, installable Hermes plugin, and everything under `desktop/` is
+the half the app loads inside its renderer. `hermes plugins validate .` runs the
+same gates the catalog uses (manifest, capability probe, security scan, desktop
+surface) and passes.
+
 ## Development
 
-The plugin is a single plain-ESM file ([`plugin.js`](plugin.js)) using the
-`@hermes/plugin-sdk`. Drop the folder into your local
+The desktop half is a single plain-ESM file ([`desktop/plugin.js`](desktop/plugin.js))
+using the `@hermes/plugin-sdk`. Drop the folder into your local
 `<hermes-home>/desktop-plugins/` and it hot-reloads on save — no build step.
 
 `tools/hermes-plugin-sdk-hotfix.py` is a standalone, stdlib-only rescue tool
