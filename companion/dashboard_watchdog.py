@@ -1,11 +1,25 @@
+"""Watchdog: start the Hermes Web Dashboard (127.0.0.1:9119) when it is down.
+Watchdog: ξεκινά το Hermes Web Dashboard (127.0.0.1:9119) όταν δεν τρέχει.
+
+Runs as a no_agent cron job once a minute and stays silent while all is well.
+Console output is English first, Greek after (house style).
+Τρέχει ως no_agent cron job κάθε 1 λεπτό. Σιωπηλό όταν όλα είναι εντάξει.
+Η έξοδος είναι αγγλικά πρώτα, μετά ελληνικά.
+"""
+
 import os
 import socket
 import subprocess
 import sys
 import time
 
-# Watchdog: ξεκινά το Hermes Web Dashboard (127.0.0.1:9119) όταν δεν τρέχει.
-# Τρέχει ως no_agent cron job κάθε 1 λεπτό. Σιωπηλό όταν όλα είναι εντάξει.
+# History (2026-09-08): after an update the dashboard rebuilt its web UI (~60s
+# boot). Two concurrent watchdog runs (the app runs two serve processes) spawned
+# TWO dashboards -- the old lock was not atomic (it only checked a pid after the
+# fact) and on Windows `hermes` has no cross-process build lock (fcntl is
+# Unix-only). The two instances collided on port 9119 and BOTH died silently.
+# Fix: atomic lock (O_EXCL) before the spawn + verify the lock holder really is
+# a dashboard process.
 #
 # Ιστορικό (2026-09-08): μετά από update το dashboard έκανε rebuild του web UI
 # (~60s boot). Δύο ταυτόχρονες εκτελέσεις του watchdog (το app τρέχει δύο
@@ -19,7 +33,9 @@ HOME = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'he
 LOCK = os.path.join(HOME, 'dashboard_watchdog.lock')
 LOGDIR = os.path.join(HOME, 'logs')
 HOST, PORT = '127.0.0.1', 9119
-STALE_EMPTY_LOCK_SECONDS = 120  # lock χωρίς pid νεότερο από αυτό = boot σε εξέλιξη
+# A pid-less lock younger than this means a boot is in progress.
+# Lock χωρίς pid νεότερο από αυτό = boot σε εξέλιξη.
+STALE_EMPTY_LOCK_SECONDS = 120
 
 
 def port_open():
@@ -49,7 +65,10 @@ def pid_alive(pid):
 
 
 def pid_is_dashboard(pid):
-    """True αν το pid ανήκει σε διεργασία που τρέχει `hermes dashboard`."""
+    """True if pid belongs to a process running `hermes dashboard`.
+
+    True αν το pid ανήκει σε διεργασία που τρέχει `hermes dashboard`.
+    """
     if not pid or pid <= 0:
         return False
     try:
@@ -60,6 +79,7 @@ def pid_is_dashboard(pid):
             return False
         return 'dashboard' in cmdline and 'hermes' in cmdline
     except ImportError:
+        # No psutil: accept any live pid (the old behaviour).
         # Χωρίς psutil: δεχόμαστε κάθε ζωντανό pid (παλιά συμπεριφορά).
         return pid_alive(pid)
 
@@ -81,44 +101,51 @@ def _lock_fresh():
 
 
 def _acquire_lock_and_spawn():
-    """Προσπαθεί να αποκτήσει το lock atomic (O_EXCL). Αν το πάρει, κάνει το
+    """Try to take the lock atomically (O_EXCL); on success spawn the dashboard
+    and write its pid into the lock. Returns the proc, or None if another
+    watchdog got there first (or the holder is a live dashboard).
+
+    Προσπαθεί να αποκτήσει το lock atomic (O_EXCL). Αν το πάρει, κάνει το
     spawn και γράφει το pid του dashboard στο lock. Επιστρέφει το proc ή None
-    αν άλλος watchdog το πρόλαβε (ή ο κάτοχος είναι ζωντανό dashboard)."""
-    for attempt in (0, 1):  # 2η προσπάθεια: μετά από κλέψιμο stale lock
+    αν άλλος watchdog το πρόλαβε (ή ο κάτοχος είναι ζωντανό dashboard).
+    """
+    for attempt in (0, 1):  # second attempt: after breaking a stale lock
         try:
             fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             holder = _read_lock_pid()
             if holder is None:
+                # Lock without a pid: either just created by another watchdog
+                # that is about to spawn, or stale from an older version.
                 # Lock χωρίς pid: μόλις δημιουργήθηκε από άλλο watchdog που
                 # ετοιμάζει spawn (ή είναι stale από παλιά έκδοση).
                 if _lock_fresh():
-                    return None  # κάποιος άλλος bootάρει — μην μπλέξουμε
-                # Stale χωρίς pid: το σπάμε και ξαναπροσπαθούμε.
+                    return None  # someone else is booting -- stay out of it
+                # Stale and pid-less: break it and retry.
                 try:
                     os.remove(LOCK)
                 except OSError:
                     return None
                 continue
             if pid_is_dashboard(holder):
-                return None  # ζωντανό dashboard bootάρει ή τρέχει ήδη
+                return None  # a live dashboard is booting or already up
             if pid_alive(holder) and not pid_is_dashboard(holder):
-                # Ζωντανό pid που ΔΕΝ είναι dashboard (pid reuse από άλλη
-                # διεργασία): το lock είναι ψεύτικο — το σπάμε.
+                # Live pid that is NOT a dashboard (pid reuse by another
+                # process): the lock is bogus -- break it.
                 try:
                     os.remove(LOCK)
                 except OSError:
                     return None
                 continue
-            # Νεκρό pid: stale lock — το σπάμε και ξαναπροσπαθούμε.
+            # Dead pid: stale lock -- break it and retry.
             try:
                 os.remove(LOCK)
             except OSError:
                 return None
             continue
-        # Έχουμε το lock. Spawnάρουμε και μετά γράφουμε το pid.
+        # We hold the lock. Spawn, then write the pid.
         env = dict(os.environ)
-        env.pop('HERMES_WEB_DIST', None)  # αλλιώς σερβίρει το desktop dist αντί για το web dashboard
+        env.pop('HERMES_WEB_DIST', None)  # otherwise it serves the desktop dist instead of the web dashboard
         try:
             os.makedirs(LOGDIR, exist_ok=True)
             logpath = os.path.join(LOGDIR, 'dashboard_autostart.log')
@@ -145,6 +172,7 @@ def _acquire_lock_and_spawn():
                 os.remove(LOCK)
             except OSError:
                 pass
+            print(f'[dashboard-watchdog] FAILED to start the dashboard: {exc}')
             print(f'[dashboard-watchdog] ΑΠΟΤΥΧΙΑ εκκίνησης dashboard: {exc}')
             return None
     return None
@@ -152,12 +180,14 @@ def _acquire_lock_and_spawn():
 
 def main():
     if port_open():
-        return  # το dashboard τρέχει ήδη - τίποτα να κάνουμε (σιωπηλό)
+        return  # dashboard already running - nothing to do (silent) / σιωπηλό
 
     proc = _acquire_lock_and_spawn()
     if proc is None:
-        return  # άλλος watchdog ανέλαβε ή το lock ήταν έγκυρο (σιωπηλό)
-    print(f'[dashboard-watchdog] Ξεκίνησε το dashboard (pid {proc.pid}) στις {time.strftime("%H:%M:%S")} - log: {os.path.join(LOGDIR, "dashboard_autostart.log")}')
+        return  # another watchdog took over, or lock was valid (silent) / σιωπηλό
+    logpath = os.path.join(LOGDIR, 'dashboard_autostart.log')
+    print(f'[dashboard-watchdog] dashboard started (pid {proc.pid}) at {time.strftime("%H:%M:%S")} - log: {logpath}')
+    print(f'[dashboard-watchdog] Ξεκίνησε το dashboard (pid {proc.pid}) στις {time.strftime("%H:%M:%S")} - log: {logpath}')
 
 
 if __name__ == '__main__':
